@@ -136,7 +136,7 @@ void loop() {
         safety_millis = 0;
       }
 
-
+      // TODO need to add the motor loop to program main loop 
       break;
     case WAIT_FOR_COMMAND:
       // TODO
