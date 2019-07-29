@@ -5,7 +5,7 @@
 #include "secret.h"
 #include <string.h>
 
-#define DEBUG
+// #define DEBUG
 #ifdef DEBUG
 #define DEBUG_PRINT(x) Serial.println(x)
 #else
@@ -14,7 +14,7 @@
 
 // Motor steps per revolution.
 #define MOTOR_STEPS 200
-#define RPM 20 //We need to go slow to stop the motor from skipping
+#define RPM 100 //We need to go slow to stop the motor from skipping
 
 // Microstepping
 // 1 = full step, 2 = half step etc..
@@ -22,10 +22,10 @@
 #define MICROSTEPS 16
 
 // All the wires needed for full functionality
-#define DIR 5       // TODO
-#define STEP 4      // TODO
-#define ENABLE 13   // TODO
-#define REED_PIN 12 // TODO, needs interrupt
+#define DIR 15       // TODO
+#define STEP 13      // TODO
+#define ENABLE 12   // TODO
+#define REED_PIN 14 // TODO, needs interrupt
 
 // 3-wire basic config, microstepping is hardwired on the driver
 BasicStepperDriver stepper(MOTOR_STEPS, DIR, STEP, ENABLE);
@@ -64,8 +64,8 @@ enum ROLLER_STATE
 
 enum DIRECTION
 {
-  DIR_FOLD = 1,
-  DIR_UNFOLD = -1
+  DIR_FOLD = -1,
+  DIR_UNFOLD = 1
 };
 
 int state;
@@ -73,7 +73,6 @@ int rotor_position;
 int rotation_count;
 int full_extend_rotation_count;
 int full_stowed_rotation_count;
-const int SAFETY_STOP = 1000;
 int safety_millis;
 int previous_position;
 int target_position;
@@ -81,12 +80,30 @@ int direction;
 char status[10];
 long mqtt_update_period;
 long mqtt_time_variable = 0;
+long debounce_time_constant = 15;
+long debounce_prev_time = 0;
+
+
+#ifdef DEBUG
+const int SAFETY_STOP = 60000;
+int time_the_loop_start = 0;
+int time_the_loop_duration = 0;
+#else
+const int SAFETY_STOP = 1000;
+#endif
 
 // Global Function Definitions
 ICACHE_RAM_ATTR void InterruptHandler()
 {
   // Depending on motor direction, keep track of true position of the rotor
-  rotation_count += direction;
+  // Apply debouncing to eliminate false triggers
+  if(micros() - debounce_prev_time > debounce_time_constant*1000){
+    debounce_prev_time = micros();
+    rotation_count += direction;
+    DEBUG_PRINT("Rotation count:");
+    DEBUG_PRINT(rotation_count);
+  }
+
 }
 
 void MQTTCallback(char *topic, byte *payload, unsigned int length)
@@ -121,7 +138,7 @@ void MQTTCallback(char *topic, byte *payload, unsigned int length)
 void setup()
 {
 #ifdef DEBUG
-  Serial.begin(115200);
+  Serial.begin(250000);
 #endif
   DEBUG_PRINT("Initializing Firmware...");
 
@@ -152,7 +169,7 @@ void setup()
   // State Machine Initialization
   DEBUG_PRINT("State Machine Initialization");
   state = WAIT_FOR_COMMAND;
-  full_extend_rotation_count = 15;
+  full_extend_rotation_count = 30;
   full_stowed_rotation_count = 0;
   rotor_position = 0;
 
@@ -164,6 +181,9 @@ void loop()
   // Main State Machine
   DEBUG_PRINT("in th loop");
   DEBUG_PRINT(state);
+  #ifdef DEBUG
+  time_the_loop_start = millis();
+  #endif
 
   switch (state)
   {
@@ -199,7 +219,15 @@ void loop()
   case ROTATE:
     DEBUG_PRINT("In the ROTATE routine");
     rotor_position = rotation_count;
-    if (rotor_position - direction * target_position <= 0)
+    DEBUG_PRINT("--------------------");
+    DEBUG_PRINT("Rotor position:");
+    DEBUG_PRINT(rotor_position);
+    DEBUG_PRINT("Target Position:");
+    DEBUG_PRINT(target_position);
+    DEBUG_PRINT("Stop Condition:");
+    DEBUG_PRINT(rotor_position - direction * target_position);
+    DEBUG_PRINT("--------------------");
+    if ( ( -direction * rotor_position + target_position) <= 0)
     {
       // If the current position reached the target, stop the motor
       stepper.stop();
@@ -230,6 +258,7 @@ void loop()
       stepper.disable();
       // Go to ERROR state
       state = ERROR;
+      DEBUG_PRINT("Safety stop due to wait time triggered.");
     }
 
     if (abs(rotation_count - previous_position) > 1)
@@ -238,6 +267,7 @@ void loop()
       safety_millis = millis();
       // Reset the previous position
       previous_position = rotation_count;
+      DEBUG_PRINT("Resetting safety.");
     }
 
     strncpy(status, "InMotion", sizeof(status));
@@ -269,6 +299,9 @@ void loop()
     break;
   case ERROR:
     DEBUG_PRINT("Error occurred");
+    #ifdef DEBUG
+    state = WAIT_FOR_COMMAND;
+    #endif
     // TODO
     break;
 
@@ -332,11 +365,19 @@ void loop()
   if (wait_time_micros <= 0)
   {
     stepper.disable(); // comment out to keep motor powered
-    // delay(1000);
+    #ifdef DEBUG
+    DEBUG_PRINT("Stopping motor. Reached the target position.");
+    delay(1000);
+    #endif
   }
   // (optional) execute other code if we have enough time
   if (wait_time_micros > 100)
   {
+    #ifdef DEBUG
+    DEBUG_PRINT("Long wait.");
+    DEBUG_PRINT(wait_time_micros);
+    // delay(50);
+    #endif
     // other code here
   }
 
@@ -345,8 +386,10 @@ void loop()
     client.publish(MQTT_TOPIC_STATUS_STATE, status);
     mqtt_time_variable = millis();
   }
-#ifdef DEBUG
-  delay(2000);
-#endif
+  #ifdef DEBUG
+    time_the_loop_duration = millis() - time_the_loop_start;
+    DEBUG_PRINT(time_the_loop_duration);
+   // delay(10);
+  #endif
   /////////////////////////////////////////////////////////////////////////////
 }
