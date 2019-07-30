@@ -14,7 +14,12 @@
 
 // Motor steps per revolution.
 #define MOTOR_STEPS 200
-#define RPM 100 //We need to go slow to stop the motor from skipping
+#define RPM 25 //We need to go slow to stop the motor from skipping
+#define ROTATION_PERIOD 60000 / RPM;
+#define MAX_REVOLUTIONS 30
+#define MAX_PULSE_TIME 1000
+#define PULSE_DUTY_UNFOLD 0.229 // Measured duty of long pulse during unfolding
+#define PULSE_DUTY_FOLD 0.208   // Measured duty of long pulse during folding
 
 // Microstepping
 // 1 = full step, 2 = half step etc..
@@ -22,10 +27,10 @@
 #define MICROSTEPS 16
 
 // All the wires needed for full functionality
-#define DIR 15       // TODO
-#define STEP 13      // TODO
-#define ENABLE 12   // TODO
-#define REED_PIN 14 // TODO, needs interrupt
+#define DIR 15      // 
+#define STEP 13     // 
+#define ENABLE 12   // 
+#define REED_PIN 14 // needs interrupt
 
 // 3-wire basic config, microstepping is hardwired on the driver
 BasicStepperDriver stepper(MOTOR_STEPS, DIR, STEP, ENABLE);
@@ -80,16 +85,16 @@ int direction;
 char status[10];
 long mqtt_update_period;
 long mqtt_time_variable = 0;
-long debounce_time_constant = 15;
-long debounce_prev_time = 0;
-
+long debounce_pulse_start = 0;
+long debounce_pulse_time = 0;
+float required_pulse_width = 200.0;
 
 #ifdef DEBUG
 const int SAFETY_STOP = 60000;
 int time_the_loop_start = 0;
 int time_the_loop_duration = 0;
 #else
-const int SAFETY_STOP = 1000;
+const int SAFETY_STOP = 5000;
 #endif
 
 // Global Function Definitions
@@ -97,13 +102,23 @@ ICACHE_RAM_ATTR void InterruptHandler()
 {
   // Depending on motor direction, keep track of true position of the rotor
   // Apply debouncing to eliminate false triggers
-  if(micros() - debounce_prev_time > debounce_time_constant*1000){
-    debounce_prev_time = micros();
-    rotation_count += direction;
-    DEBUG_PRINT("Rotation count:");
-    DEBUG_PRINT(rotation_count);
+  noInterrupts();
+  if (digitalRead(REED_PIN) == LOW)
+  {
+    debounce_pulse_start = millis();
   }
-
+  else
+  {
+    debounce_pulse_time = millis() - debounce_pulse_start;
+    if (debounce_pulse_time >= required_pulse_width && debounce_pulse_time < MAX_PULSE_TIME)
+    {
+      rotation_count += direction;
+      DEBUG_PRINT("Rotation count:");
+      DEBUG_PRINT(rotation_count);
+      Serial.printf("Pulse Length: %d, Rotation count: %d\, Required pulse: %f \r\n", debounce_pulse_time, rotation_count, required_pulse_width);
+    }
+  }
+  interrupts();
 }
 
 void MQTTCallback(char *topic, byte *payload, unsigned int length)
@@ -140,6 +155,7 @@ void setup()
 #ifdef DEBUG
   Serial.begin(250000);
 #endif
+  Serial.begin(250000);
   DEBUG_PRINT("Initializing Firmware...");
 
   // Stepper Motor initialization
@@ -163,13 +179,13 @@ void setup()
   DEBUG_PRINT("Reed Initialization");
   rotation_count = 0;
   pinMode(REED_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(REED_PIN), InterruptHandler, FALLING);
+  attachInterrupt(digitalPinToInterrupt(REED_PIN), InterruptHandler, CHANGE);
   ///////////////////////////////////////////////////////////////////
 
   // State Machine Initialization
   DEBUG_PRINT("State Machine Initialization");
   state = WAIT_FOR_COMMAND;
-  full_extend_rotation_count = 30;
+  full_extend_rotation_count = 15;
   full_stowed_rotation_count = 0;
   rotor_position = 0;
 
@@ -181,9 +197,9 @@ void loop()
   // Main State Machine
   DEBUG_PRINT("in th loop");
   DEBUG_PRINT(state);
-  #ifdef DEBUG
+#ifdef DEBUG
   time_the_loop_start = millis();
-  #endif
+#endif
 
   switch (state)
   {
@@ -191,11 +207,14 @@ void loop()
     DEBUG_PRINT("In the UNFOLD routine");
     // First enable the stepper
     stepper.enable();
+    required_pulse_width = PULSE_DUTY_UNFOLD * ROTATION_PERIOD; // The required pulse length is set according to measurements
+    debounce_pulse_start = 0;                                   // Reset the debounce times
+    debounce_pulse_time = 0;
 
     safety_millis = millis(); // Mark the start time of the rotation
     previous_position = rotation_count;
 
-    stepper.startRotate(20 * 360); // Start rotating
+    stepper.startRotate(MAX_REVOLUTIONS * 360); // Start rotating
     target_position = full_extend_rotation_count;
     direction = DIR_UNFOLD;
     state = ROTATE;
@@ -205,11 +224,14 @@ void loop()
     DEBUG_PRINT("In the FOLD routine");
     // First enable the stepper
     stepper.enable();
+    required_pulse_width = PULSE_DUTY_FOLD * ROTATION_PERIOD; // The required pulse length is set according to measurements
+    debounce_pulse_start = 0;                                 // Reset the debounce times
+    debounce_pulse_time = 0;
 
     safety_millis = millis(); // Mark the start time of the rotation
     previous_position = rotation_count;
 
-    stepper.startRotate(-20 * 360); // Start rotating
+    stepper.startRotate(-MAX_REVOLUTIONS * 360); // Start rotating
     target_position = full_stowed_rotation_count;
     direction = DIR_FOLD;
 
@@ -227,7 +249,7 @@ void loop()
     DEBUG_PRINT("Stop Condition:");
     DEBUG_PRINT(rotor_position - direction * target_position);
     DEBUG_PRINT("--------------------");
-    if ( ( -direction * rotor_position + target_position) <= 0)
+    if ((-direction * rotor_position + target_position) <= 0)
     {
       // If the current position reached the target, stop the motor
       stepper.stop();
@@ -299,9 +321,9 @@ void loop()
     break;
   case ERROR:
     DEBUG_PRINT("Error occurred");
-    #ifdef DEBUG
+#ifdef DEBUG
     state = WAIT_FOR_COMMAND;
-    #endif
+#endif
     // TODO
     break;
 
@@ -365,19 +387,19 @@ void loop()
   if (wait_time_micros <= 0)
   {
     stepper.disable(); // comment out to keep motor powered
-    #ifdef DEBUG
+#ifdef DEBUG
     DEBUG_PRINT("Stopping motor. Reached the target position.");
     delay(1000);
-    #endif
+#endif
   }
   // (optional) execute other code if we have enough time
   if (wait_time_micros > 100)
   {
-    #ifdef DEBUG
+#ifdef DEBUG
     DEBUG_PRINT("Long wait.");
     DEBUG_PRINT(wait_time_micros);
-    // delay(50);
-    #endif
+// delay(50);
+#endif
     // other code here
   }
 
@@ -386,10 +408,10 @@ void loop()
     client.publish(MQTT_TOPIC_STATUS_STATE, status);
     mqtt_time_variable = millis();
   }
-  #ifdef DEBUG
-    time_the_loop_duration = millis() - time_the_loop_start;
-    DEBUG_PRINT(time_the_loop_duration);
-   // delay(10);
-  #endif
+#ifdef DEBUG
+  time_the_loop_duration = millis() - time_the_loop_start;
+  DEBUG_PRINT(time_the_loop_duration);
+  // delay(10);
+#endif
   /////////////////////////////////////////////////////////////////////////////
 }
