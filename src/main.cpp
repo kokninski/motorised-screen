@@ -4,6 +4,7 @@
 #include <ESP8266WiFi.h>
 #include "secret.h"
 #include <string.h>
+#include "ota.h"
 
 // #define DEBUG
 #ifdef DEBUG
@@ -188,6 +189,10 @@ void setup()
   full_extend_rotation_count = 15;
   full_stowed_rotation_count = 0;
   rotor_position = 0;
+
+  ///////////////////////////////////////////////////////////////////
+  // OTA Initialization 
+  otasetup();
 
   ///////////////////////////////////////////////////////////////////
 }
@@ -395,6 +400,7 @@ void loop()
   // (optional) execute other code if we have enough time
   if (wait_time_micros > 100)
   {
+    otaloop();
 #ifdef DEBUG
     DEBUG_PRINT("Long wait.");
     DEBUG_PRINT(wait_time_micros);
