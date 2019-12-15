@@ -5,7 +5,7 @@
 #include "secret.h"
 #include <string.h>
 
-// #define DEBUG
+#define DEBUG
 #ifdef DEBUG
 #define DEBUG_PRINT(x) Serial.println(x)
 #else
@@ -14,12 +14,12 @@
 
 // Motor steps per revolution.
 #define MOTOR_STEPS 200
-#define RPM 25 //We need to go slow to stop the motor from skipping
+#define RPM 30 //We need to go slow to stop the motor from skipping
 #define ROTATION_PERIOD 60000 / RPM;
 #define MAX_REVOLUTIONS 30
-#define MAX_PULSE_TIME 1000
-#define PULSE_DUTY_UNFOLD 0.229 // Measured duty of long pulse during unfolding
-#define PULSE_DUTY_FOLD 0.208   // Measured duty of long pulse during folding
+#define MAX_PULSE_TIME 650
+#define PULSE_DUTY_UNFOLD 0.200 // Measured duty of long pulse during unfolding
+#define PULSE_DUTY_FOLD 0.200   // Measured duty of long pulse during folding
 
 // Microstepping
 // 1 = full step, 2 = half step etc..
@@ -27,10 +27,10 @@
 #define MICROSTEPS 16
 
 // All the wires needed for full functionality
-#define DIR 15      // 
-#define STEP 13     // 
-#define ENABLE 12   // 
-#define REED_PIN 14 // needs interrupt
+#define DIR 13      // 
+#define STEP 12     // 
+#define ENABLE 4   // 
+#define REED_PIN 5 // needs interrupt
 
 // 3-wire basic config, microstepping is hardwired on the driver
 BasicStepperDriver stepper(MOTOR_STEPS, DIR, STEP, ENABLE);
@@ -38,7 +38,7 @@ BasicStepperDriver stepper(MOTOR_STEPS, DIR, STEP, ENABLE);
 // MQTT Definitions
 #define MQTT_TOPIC_CMD_PREFIX "cmnd"
 #define MQTT_TOPIC_STATUS_PREFIX "stat"
-#define MQTT_DEV_ID "EspMotorController"
+#define MQTT_DEV_ID "EspMotorController2"
 
 #define MQTT_TOPIC_SUBSCRIBE MQTT_TOPIC_CMD_PREFIX "/" MQTT_DEV_ID "/"
 #define MQTT_TOPIC_SUBSCRIBE_WILDCARD MQTT_TOPIC_SUBSCRIBE "#"
@@ -102,7 +102,9 @@ ICACHE_RAM_ATTR void InterruptHandler()
 {
   // Depending on motor direction, keep track of true position of the rotor
   // Apply debouncing to eliminate false triggers
-  noInterrupts();
+  // noInterrupts();
+  detachInterrupt(REED_PIN);
+
   if (digitalRead(REED_PIN) == LOW)
   {
     debounce_pulse_start = millis();
@@ -118,7 +120,9 @@ ICACHE_RAM_ATTR void InterruptHandler()
       Serial.printf("Pulse Length: %d, Rotation count: %d\, Required pulse: %f \r\n", debounce_pulse_time, rotation_count, required_pulse_width);
     }
   }
-  interrupts();
+  // interrupts();
+  attachInterrupt(digitalPinToInterrupt(REED_PIN), InterruptHandler, CHANGE);
+
 }
 
 void MQTTCallback(char *topic, byte *payload, unsigned int length)
@@ -185,8 +189,8 @@ void setup()
   // State Machine Initialization
   DEBUG_PRINT("State Machine Initialization");
   state = WAIT_FOR_COMMAND;
-  full_extend_rotation_count = 15;
-  full_stowed_rotation_count = 0;
+  full_extend_rotation_count = 20*2;
+  full_stowed_rotation_count = 2*2;  // Slightly counterintuitive - positive number here means that the motor will try to rotate extra xx revs
   rotor_position = 0;
 
   ///////////////////////////////////////////////////////////////////
@@ -204,6 +208,7 @@ void loop()
   switch (state)
   {
   case UNFOLD:
+    rotation_count = 0; // Reset the rotation count so we are sure to start counting from 0
     DEBUG_PRINT("In the UNFOLD routine");
     // First enable the stepper
     stepper.enable();
