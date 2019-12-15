@@ -17,6 +17,8 @@
 #define RPM 25 //We need to go slow to stop the motor from skipping
 #define ROTATION_PERIOD 60000 / RPM;
 #define MAX_REVOLUTIONS 30
+#define UNFOLD_REVOLUTIONS 20
+#define FOLD_REVOLUTIONS 21
 #define MAX_PULSE_TIME 1000
 #define PULSE_DUTY_UNFOLD 0.229 // Measured duty of long pulse during unfolding
 #define PULSE_DUTY_FOLD 0.208   // Measured duty of long pulse during folding
@@ -88,6 +90,7 @@ long mqtt_time_variable = 0;
 long debounce_pulse_start = 0;
 long debounce_pulse_time = 0;
 float required_pulse_width = 200.0;
+unsigned int wait_time_micros;
 
 #ifdef DEBUG
 const int SAFETY_STOP = 60000;
@@ -115,7 +118,9 @@ ICACHE_RAM_ATTR void InterruptHandler()
       rotation_count += direction;
       DEBUG_PRINT("Rotation count:");
       DEBUG_PRINT(rotation_count);
-      Serial.printf("Pulse Length: %d, Rotation count: %d\, Required pulse: %f \r\n", debounce_pulse_time, rotation_count, required_pulse_width);
+      #ifdef DEBUG
+      Serial.printf("Pulse Length: %d, Rotation count: %d, Required pulse: %f \r\n", debounce_pulse_time, rotation_count, required_pulse_width);
+      #endif
     }
   }
   interrupts();
@@ -175,19 +180,16 @@ void setup()
   DEBUG_PRINT(WiFi.isConnected());
   ///////////////////////////////////////////////////////////////////
 
-  // Attach Interrupt to reed sensor
-  DEBUG_PRINT("Reed Initialization");
-  rotation_count = 0;
-  pinMode(REED_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(REED_PIN), InterruptHandler, CHANGE);
-  ///////////////////////////////////////////////////////////////////
+  // // Attach Interrupt to reed sensor
+  // DEBUG_PRINT("Reed Initialization");
+  // rotation_count = 0;
+  // pinMode(REED_PIN, INPUT_PULLUP);
+  // attachInterrupt(digitalPinToInterrupt(REED_PIN), InterruptHandler, CHANGE);
+  // ///////////////////////////////////////////////////////////////////
 
   // State Machine Initialization
   DEBUG_PRINT("State Machine Initialization");
   state = WAIT_FOR_COMMAND;
-  full_extend_rotation_count = 15;
-  full_stowed_rotation_count = 0;
-  rotor_position = 0;
 
   ///////////////////////////////////////////////////////////////////
 }
@@ -207,103 +209,121 @@ void loop()
     DEBUG_PRINT("In the UNFOLD routine");
     // First enable the stepper
     stepper.enable();
-    required_pulse_width = PULSE_DUTY_UNFOLD * ROTATION_PERIOD; // The required pulse length is set according to measurements
-    debounce_pulse_start = 0;                                   // Reset the debounce times
-    debounce_pulse_time = 0;
 
-    safety_millis = millis(); // Mark the start time of the rotation
-    previous_position = rotation_count;
-
-    stepper.startRotate(MAX_REVOLUTIONS * 360); // Start rotating
-    target_position = full_extend_rotation_count;
+    stepper.startRotate(UNFOLD_REVOLUTIONS * 360); // Start rotating
     direction = DIR_UNFOLD;
-    state = ROTATE;
+    state = WAIT_FOR_COMMAND;
     break;
 
   case FOLD:
     DEBUG_PRINT("In the FOLD routine");
     // First enable the stepper
     stepper.enable();
-    required_pulse_width = PULSE_DUTY_FOLD * ROTATION_PERIOD; // The required pulse length is set according to measurements
-    debounce_pulse_start = 0;                                 // Reset the debounce times
-    debounce_pulse_time = 0;
 
-    safety_millis = millis(); // Mark the start time of the rotation
-    previous_position = rotation_count;
-
-    stepper.startRotate(-MAX_REVOLUTIONS * 360); // Start rotating
-    target_position = full_stowed_rotation_count;
+    stepper.startRotate(-FOLD_REVOLUTIONS * 360); // Start rotating
     direction = DIR_FOLD;
 
-    state = ROTATE;
+    state = WAIT_FOR_COMMAND; // Need to avoid initiating this multiple times
     break;
 
-  case ROTATE:
-    DEBUG_PRINT("In the ROTATE routine");
-    rotor_position = rotation_count;
-    DEBUG_PRINT("--------------------");
-    DEBUG_PRINT("Rotor position:");
-    DEBUG_PRINT(rotor_position);
-    DEBUG_PRINT("Target Position:");
-    DEBUG_PRINT(target_position);
-    DEBUG_PRINT("Stop Condition:");
-    DEBUG_PRINT(rotor_position - direction * target_position);
-    DEBUG_PRINT("--------------------");
-    if ((-direction * rotor_position + target_position) <= 0)
-    {
-      // If the current position reached the target, stop the motor
-      stepper.stop();
-      stepper.disable();
-      // Go back to WAIT state
-      state = WAIT_FOR_COMMAND;
-      mqtt_update_period = 300000L;
+  // case ROTATE:
+  //   DEBUG_PRINT("In the ROTATE routine");
+  //   rotor_position = rotation_count;
+  //   DEBUG_PRINT("--------------------");
+  //   DEBUG_PRINT("Rotor position:");
+  //   DEBUG_PRINT(rotor_position);
+  //   DEBUG_PRINT("Target Position:");
+  //   DEBUG_PRINT(target_position);
+  //   DEBUG_PRINT("Stop Condition:");
+  //   DEBUG_PRINT(rotor_position - direction * target_position);
+  //   DEBUG_PRINT("--------------------");
+  //   if ((-direction * rotor_position + target_position) <= 0)
+  //   {
+  //     // If the current position reached the target, stop the motor
+  //     stepper.stop();
+  //     stepper.disable();
+  //     // Go back to WAIT state
+  //     state = WAIT_FOR_COMMAND;
+  //     mqtt_update_period = 300000L;
 
-      if (rotor_position == full_extend_rotation_count)
-      {
-        strncpy(status, "Extended", sizeof(status));
-      }
-      else if (rotor_position == full_stowed_rotation_count)
-      {
-        strncpy(status, "Folded", sizeof(status));
-      }
-      else
-      {
-        sprintf(status, "%d", rotation_count);
-      }
-    }
+  //     if (rotor_position == full_extend_rotation_count)
+  //     {
+  //       strncpy(status, "Extended", sizeof(status));
+  //     }
+  //     else if (rotor_position == full_stowed_rotation_count)
+  //     {
+  //       strncpy(status, "Folded", sizeof(status));
+  //     }
+  //     else
+  //     {
+  //       sprintf(status, "%d", rotation_count);
+  //     }
+  //   }
 
-    if (millis() - safety_millis > SAFETY_STOP)
-    {
-      // If one revolution takes more than perscribed amount
-      // the stepper is likely blocked, in this case stop rotation
-      stepper.stop();
-      stepper.disable();
-      // Go to ERROR state
-      state = ERROR;
-      DEBUG_PRINT("Safety stop due to wait time triggered.");
-    }
+  //   if (millis() - safety_millis > SAFETY_STOP)
+  //   {
+  //     // If one revolution takes more than perscribed amount
+  //     // the stepper is likely blocked, in this case stop rotation
+  //     stepper.stop();
+  //     stepper.disable();
+  //     // Go to ERROR state
+  //     state = ERROR;
+  //     DEBUG_PRINT("Safety stop due to wait time triggered.");
+  //   }
 
-    if (abs(rotation_count - previous_position) > 1)
-    {
-      // If we rotated at least one revolution reset the timer
-      safety_millis = millis();
-      // Reset the previous position
-      previous_position = rotation_count;
-      DEBUG_PRINT("Resetting safety.");
-    }
+  //   if (abs(rotation_count - previous_position) > 1)
+  //   {
+  //     // If we rotated at least one revolution reset the timer
+  //     safety_millis = millis();
+  //     // Reset the previous position
+  //     previous_position = rotation_count;
+  //     DEBUG_PRINT("Resetting safety.");
+  //   }
 
-    strncpy(status, "InMotion", sizeof(status));
-    mqtt_update_period = 1000L; // Increase the update period while in motion
-    // TODO need to add the motor loop to program main loop  -- DONE?
-    break;
+  //   strncpy(status, "InMotion", sizeof(status));
+  //   mqtt_update_period = 1000L; // Increase the update period while in motion
+  //   // TODO need to add the motor loop to program main loop  -- DONE?
+  //   break;
 
   case WAIT_FOR_COMMAND:
+    // Section containing calls to functions that need to be run periodically ///
+    DEBUG_PRINT("Periodic function calls");
+
+    wait_time_micros = stepper.nextAction();
+    // 0 wait time indicates the motor has stopped
+    if (wait_time_micros <= 0)
+    {
+      stepper.disable(); // comment out to keep motor powered
+      #ifdef DEBUG
+        DEBUG_PRINT("Stopping motor. Reached the target position.");
+        delay(1000);
+      #endif
+    }
+    // (optional) execute other code if we have enough time
+    if (wait_time_micros < 100 && wait_time_micros > 0)
+    {
+      // If the time between pulses is too short do not run periodic calls
+      break;
+    }
+
+    client.loop();
+    if (millis() - mqtt_time_variable > mqtt_update_period)
+    {
+      client.publish(MQTT_TOPIC_STATUS_STATE, status);
+      mqtt_time_variable = millis();
+    }
+    #ifdef DEBUG
+      time_the_loop_duration = millis() - time_the_loop_start;
+      DEBUG_PRINT(time_the_loop_duration);
+      // delay(10);
+    #endif
+
     DEBUG_PRINT("Waiting for command");
     // TODO
     // TODO provide check to fold only when unfolded and vice versa
 
     // If we are not connected to Wifi -> connect
-    // TODO add timer to stop it running too often
+    // TODO add timer to stop it running too often 
     DEBUG_PRINT(WiFi.status());
     if (WiFi.status() != WL_CONNECTED)
     {
@@ -321,9 +341,9 @@ void loop()
     break;
   case ERROR:
     DEBUG_PRINT("Error occurred");
-#ifdef DEBUG
-    state = WAIT_FOR_COMMAND;
-#endif
+    #ifdef DEBUG
+      state = WAIT_FOR_COMMAND;
+    #endif
     // TODO
     break;
 
@@ -378,40 +398,5 @@ void loop()
     // TODO
     break;
   }
-  // Section containing calls to functions that need to be run periodically ///
-  client.loop();
-  DEBUG_PRINT("Periodic function calls");
-
-  unsigned wait_time_micros = stepper.nextAction();
-  // 0 wait time indicates the motor has stopped
-  if (wait_time_micros <= 0)
-  {
-    stepper.disable(); // comment out to keep motor powered
-#ifdef DEBUG
-    DEBUG_PRINT("Stopping motor. Reached the target position.");
-    delay(1000);
-#endif
-  }
-  // (optional) execute other code if we have enough time
-  if (wait_time_micros > 100)
-  {
-#ifdef DEBUG
-    DEBUG_PRINT("Long wait.");
-    DEBUG_PRINT(wait_time_micros);
-// delay(50);
-#endif
-    // other code here
-  }
-
-  if (millis() - mqtt_time_variable > mqtt_update_period)
-  {
-    client.publish(MQTT_TOPIC_STATUS_STATE, status);
-    mqtt_time_variable = millis();
-  }
-#ifdef DEBUG
-  time_the_loop_duration = millis() - time_the_loop_start;
-  DEBUG_PRINT(time_the_loop_duration);
-  // delay(10);
-#endif
-  /////////////////////////////////////////////////////////////////////////////
+  yield();
 }
